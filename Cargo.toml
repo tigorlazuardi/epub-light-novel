@@ -1,0 +1,17 @@
+[package]
+name = "epub-light-novel"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.56"
+log = "0.4.16"
+num_cpus = "1.13.1"
+pretty_env_logger = "0.4.0"
+reqwest = "0.11.10"
+scraper = "0.12.0"
+serde = { version = "1.0.136", features = ["derive"] }
+tokio = { version = "1.17.0", features = ["full"] }
+toml = "0.5.8"
