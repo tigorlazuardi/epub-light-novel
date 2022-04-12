@@ -1,16 +1,23 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
-use anyhow::{bail, Context, Result};
-use reqwest::{Client, Response, Url};
+use anyhow::{bail, Context, Error, Result};
+use reqwest::{Client, Url};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scraper {
-    config: ScraperConfig,
+    config: Arc<ScraperConfig>,
     client: Client,
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
+}
+
+#[derive(Debug)]
+pub struct ScrapeData {
+    pub data: Vec<String>,
+    pub index: usize,
 }
 
 impl Scraper {
@@ -21,13 +28,13 @@ impl Scraper {
             config.download_threads
         );
         Self {
-            config,
+            config: Arc::new(config),
             client,
-            semaphore,
+            semaphore: Arc::new(semaphore),
         }
     }
 
-    pub async fn scrape(&self, url: &str) -> Result<()> {
+    pub async fn scrape(&self, url: &str) -> Result<UnboundedReceiver<Result<ScrapeData>>> {
         let uri = Url::try_from(url).with_context(|| format!("invalid url: {}", url))?;
 
         let host = uri
@@ -43,7 +50,32 @@ impl Scraper {
 
         cfg.validate()?;
 
-        Ok(())
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tokio::spawn({
+            let cfg = Arc::new(cfg);
+            let this = self.clone();
+            let chan = tx;
+            let url = url.to_string();
+            async move {
+                let act = async {
+                    let chan = chan.clone();
+                    let html = this.download_page(&url).await?;
+                    this.scrape_data(html, cfg, chan, 1)?;
+                    Ok::<(), Error>(())
+                };
+                if let Err(err) = act.await {
+                    if chan.send(Err(err)).is_err() {
+                        log::debug!(
+                            "download channel is already closed. not sending more data from 1. {}",
+                            url
+                        );
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
     }
 
     async fn download_page(&self, url: &str) -> Result<Html> {
@@ -52,6 +84,8 @@ impl Scraper {
             .acquire()
             .await
             .context("failed to acquire download queue")?;
+
+        log::debug!("downloading page: {}", url);
 
         let resp = self
             .client
@@ -75,6 +109,88 @@ impl Scraper {
             .with_context(|| format!("failed to read body from: {}", url))?;
 
         Ok(Html::parse_document(&body))
+    }
+
+    fn scrape_data(
+        &self,
+        webpage: Html,
+        cfg: Arc<HostConfig>,
+        chan: UnboundedSender<Result<ScrapeData>>,
+        index: usize,
+    ) -> Result<()> {
+        let next_page_selector = cfg.get_next_page_selector()?;
+        if let Some(child) = webpage.select(&next_page_selector).next() {
+            log::debug!(
+                "next page selector {}:  found a child",
+                cfg.next_page_selector
+            );
+            if let Some(url) = child.value().attr("href") {
+                log::debug!("found next page url: {}", url);
+                tokio::spawn({
+                    let cfg = cfg.clone();
+                    let this = self.clone();
+                    let url = url.to_string();
+                    let index = index + 1;
+                    let chan = chan.clone();
+                    async move {
+                        let act = async {
+                            let chan = chan.clone();
+                            let html = this.download_page(&url).await?;
+                            this.scrape_data(html, cfg, chan, index)?;
+                            Ok::<(), Error>(())
+                        };
+                        if let Err(err) = act.await {
+                            if chan.send(Err(err)).is_err() {
+                                log::debug!(
+                                    "download channel is already closed. not sending more data from {}. {}",
+                                    index,
+                                    url
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+        }
+        let selector = cfg.get_selector()?;
+        let data = webpage.select(&selector).next().with_context(|| {
+            format!("no html data found using given selector: {}", cfg.selector)
+        })?;
+        let v: Vec<String> = data
+            .children()
+            .map(|el| {
+                el.value()
+                    .as_text()
+                    .map(|f| f.to_string())
+                    .unwrap_or_else(|| "".to_string())
+            })
+            .collect();
+
+        // Ensures the starting index is not out of bounds
+        if v.get(cfg.start_index).is_none() {
+            log::debug!(
+                "no html data found from starting index of {}",
+                cfg.start_index
+            );
+            chan.send(Ok(ScrapeData {
+                data: Vec::new(),
+                index,
+            }))
+            .ok();
+            return Ok(());
+        }
+
+        // Ensures the ending index is not out of bounds
+        let mut end_index = cfg.end_index;
+        if end_index > v.len() {
+            end_index = v.len();
+        }
+
+        let v = (&v[cfg.start_index..end_index]).to_vec();
+
+        chan.send(Ok(ScrapeData { data: v, index }))?;
+
+        Ok(())
     }
 }
 
