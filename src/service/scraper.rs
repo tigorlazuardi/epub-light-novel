@@ -167,7 +167,7 @@ impl Scraper {
             .collect();
 
         // Ensures the starting index is not out of bounds
-        if v.get(cfg.start_index).is_none() {
+        if v.len() < cfg.start_index {
             log::debug!(
                 "no html data found from starting index of {}",
                 cfg.start_index
@@ -181,10 +181,11 @@ impl Scraper {
         }
 
         // Ensures the ending index is not out of bounds
-        let mut end_index = cfg.end_index;
-        if end_index > v.len() {
-            end_index = v.len();
-        }
+        let end_index = if cfg.end_index > v.len() {
+            v.len()
+        } else {
+            cfg.end_index
+        };
 
         let v = (&v[cfg.start_index..end_index]).to_vec();
 
