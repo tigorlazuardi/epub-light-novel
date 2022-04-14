@@ -85,28 +85,26 @@ impl Scraper {
             .await
             .context("failed to acquire download queue")?;
 
-        log::debug!("downloading page: {}", url);
+        log::debug!("downloading page: {url}");
 
+        let uri = url.to_string();
         let resp = self
             .client
-            .get(url.clone())
+            .get(url)
             .send()
             .await
-            .with_context(|| format!("failed to fetch webpage from: {}", url))?;
+            .with_context(|| format!("failed to fetch webpage from: {uri}"))?;
 
-        let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            bail!(
-                "unexpected status code {} when fetching page from {}",
-                status,
-                url
-            );
+            let status = resp.status().as_u16();
+            let status_name = resp.status().as_str().to_string();
+            bail!("unexpected status code [{status} {status_name}] when fetching page from {uri}");
         }
 
         let body = resp
             .text()
             .await
-            .with_context(|| format!("failed to read body from: {}", url))?;
+            .with_context(|| format!("failed to read response body from: {uri}"))?;
 
         Ok(Html::parse_document(&body))
     }
@@ -125,32 +123,31 @@ impl Scraper {
                 cfg.next_page_selector
             );
             if let Some(url) = child.value().attr("href") {
-                log::debug!("found next page url: {}", url);
-                let url = Url::try_from(url)?;
-                tokio::spawn({
-                    let cfg = cfg.clone();
-                    let this = self.clone();
-                    let index = index + 1;
-                    let chan = chan.clone();
-                    async move {
-                        let uri = url.to_string();
-                        let act = async {
+                let index = index + 1;
+                log::debug!("found next page url: {url}");
+                match Url::try_from(url) {
+                    Ok(url) => {
+                        tokio::spawn({
+                            let cfg = cfg.clone();
+                            let this = self.clone();
                             let chan = chan.clone();
-                            let html = this.download_page(url).await?;
-                            this.scrape_data(html, cfg, chan, index)?;
-                            Ok::<(), Error>(())
-                        };
-                        if let Err(err) = act.await {
-                            if chan.send((index, Err(err))).is_err() {
-                                log::debug!(
-                                    "download channel is already closed. not sending more data from {}. {}",
-                                    index,
-                                    uri
-                                );
+                            async move {
+                                let act = async {
+                                    let chan = chan.clone();
+                                    let html = this.download_page(url).await?;
+                                    this.scrape_data(html, cfg, chan, index)?;
+                                    Ok::<(), Error>(())
+                                };
+                                if let Err(err) = act.await {
+                                    chan.send((index, Err(err))).ok();
+                                }
                             }
-                        }
+                        });
                     }
-                });
+                    Err(err) => {
+                        chan.send((index, Err(err.into()))).ok();
+                    }
+                }
             }
         }
         let selector = cfg.get_selector()?;
