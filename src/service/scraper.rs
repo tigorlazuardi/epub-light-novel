@@ -34,12 +34,10 @@ impl Scraper {
         }
     }
 
-    pub async fn scrape(&self, url: &str) -> Result<UnboundedReceiver<Result<ScrapeData>>> {
-        let uri = Url::try_from(url).with_context(|| format!("invalid url: {}", url))?;
-
-        let host = uri
+    pub async fn scrape(&self, url: Url) -> Result<UnboundedReceiver<(usize, Result<ScrapeData>)>> {
+        let host = url
             .host_str()
-            .with_context(|| format!("host / domain not found in url: {}", uri))?;
+            .with_context(|| format!("host / domain not found in url: {}", url))?;
 
         let cfg = self
             .config
@@ -56,19 +54,21 @@ impl Scraper {
             let cfg = Arc::new(cfg);
             let this = self.clone();
             let chan = tx;
-            let url = url.to_string();
+            let url = url.clone();
             async move {
+                let index = 1;
+                let uri = url.to_string();
                 let act = async {
                     let chan = chan.clone();
-                    let html = this.download_page(&url).await?;
-                    this.scrape_data(html, cfg, chan, 1)?;
+                    let html = this.download_page(url).await?;
+                    this.scrape_data(html, cfg, chan, index)?;
                     Ok::<(), Error>(())
                 };
                 if let Err(err) = act.await {
-                    if chan.send(Err(err)).is_err() {
+                    if chan.send((index, Err(err))).is_err() {
                         log::debug!(
                             "download channel is already closed. not sending more data from 1. {}",
-                            url
+                            uri
                         );
                     }
                 }
@@ -78,7 +78,7 @@ impl Scraper {
         Ok(rx)
     }
 
-    async fn download_page(&self, url: &str) -> Result<Html> {
+    async fn download_page(&self, url: Url) -> Result<Html> {
         let _x = self
             .semaphore
             .acquire()
@@ -89,7 +89,7 @@ impl Scraper {
 
         let resp = self
             .client
-            .get(url)
+            .get(url.clone())
             .send()
             .await
             .with_context(|| format!("failed to fetch webpage from: {}", url))?;
@@ -115,7 +115,7 @@ impl Scraper {
         &self,
         webpage: Html,
         cfg: Arc<HostConfig>,
-        chan: UnboundedSender<Result<ScrapeData>>,
+        chan: UnboundedSender<(usize, Result<ScrapeData>)>,
         index: usize,
     ) -> Result<()> {
         let next_page_selector = cfg.get_next_page_selector()?;
@@ -126,25 +126,26 @@ impl Scraper {
             );
             if let Some(url) = child.value().attr("href") {
                 log::debug!("found next page url: {}", url);
+                let url = Url::try_from(url)?;
                 tokio::spawn({
                     let cfg = cfg.clone();
                     let this = self.clone();
-                    let url = url.to_string();
                     let index = index + 1;
                     let chan = chan.clone();
                     async move {
+                        let uri = url.to_string();
                         let act = async {
                             let chan = chan.clone();
-                            let html = this.download_page(&url).await?;
+                            let html = this.download_page(url).await?;
                             this.scrape_data(html, cfg, chan, index)?;
                             Ok::<(), Error>(())
                         };
                         if let Err(err) = act.await {
-                            if chan.send(Err(err)).is_err() {
+                            if chan.send((index, Err(err))).is_err() {
                                 log::debug!(
                                     "download channel is already closed. not sending more data from {}. {}",
                                     index,
-                                    url
+                                    uri
                                 );
                             }
                         }
@@ -172,10 +173,13 @@ impl Scraper {
                 "no html data found from starting index of {}",
                 cfg.start_index
             );
-            chan.send(Ok(ScrapeData {
-                data: Vec::new(),
+            chan.send((
                 index,
-            }))
+                Ok(ScrapeData {
+                    data: Vec::new(),
+                    index,
+                }),
+            ))
             .ok();
             return Ok(());
         }
@@ -189,7 +193,7 @@ impl Scraper {
 
         let v = (&v[cfg.start_index..end_index]).to_vec();
 
-        chan.send(Ok(ScrapeData { data: v, index }))?;
+        chan.send((index, Ok(ScrapeData { data: v, index })))?;
 
         Ok(())
     }
