@@ -2,11 +2,16 @@
 name = "epub-light-novel"
 version = "0.1.0"
 edition = "2021"
+authors = ["Tigor Hutasuhut <tigor.hutasuhut@gmail.com>"]
+description = "Scrapes html values from given selector configurations and saves them as epub"
+repository = "https://github.com/tigorlazuardi/epub-light-novel"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.56"
+clap = { version = "3.1.8", features = ["derive"] }
 log = "0.4.16"
 num_cpus = "1.13.1"
 pretty_env_logger = "0.4.0"

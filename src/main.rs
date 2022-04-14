@@ -1,9 +1,9 @@
+pub mod command;
 pub mod service;
 
 use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Hello, world!");
-    Ok(())
+    command::execute().await
 }
